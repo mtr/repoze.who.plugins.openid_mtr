@@ -1,0 +1,10 @@
+- fix the SQLStore (make the connstring a connection, add tests)
+- add tests for mem, file store
+- fix the session problem, use cookie fallback if no session is given
+- add SREG/AX/PAPE support
+- make more configuration optional and provide default values
+- rename sql_* to store_sql_* config options
+- is came_from actually working?
+
+- document logging
+- document which errors can occur in self.error_field

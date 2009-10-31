@@ -1,0 +1,13 @@
+--- identification.py	2009-10-31 16:59:28.000000000 +0100
++++ id2	2009-10-31 16:59:55.000000000 +0100
+@@ -47,7 +47,9 @@
+                     rememberer_name = '',
+                     sql_associations_table = '',
+                     sql_nonces_table = '',
+-                    sql_connstring = ''):
++                    sql_connstring = '',
++                    hans=10,
++                    huns=20):
+ 
+         self.rememberer_name = rememberer_name
+         self.login_handler_path = login_handler_path

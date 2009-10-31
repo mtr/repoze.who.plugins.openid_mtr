@@ -1,0 +1,11 @@
+syntax:glob
+*.pyo
+*.pyc
+*.egg-info
+*.cache
+*.orig
+*.rej
+*~
+*.o
+.svn
+.build

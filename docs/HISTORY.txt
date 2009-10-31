@@ -1,0 +1,32 @@
+Changelog
+=========
+
+
+0.5.3 - TBD
+-----------
+
+* added webob to requirements in setup.py
+
+
+
+0.5.2 - September 25th 2009
+---------------------------
+
+* added MANIFEST.in to make egg work again 
+
+
+
+0.5.1 - September 25th 2009
+---------------------------
+
+* fixed setup.py (removed doubles test suite)
+
+
+
+0.5 - March 15th 2009
+---------------------
+
+* Initial release
+
+
+

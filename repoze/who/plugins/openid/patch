@@ -1,0 +1,392 @@
+Index: repoze/who/plugins/openid/identification.py
+===================================================================
+--- repoze/who/plugins/openid/identification.py	(revision 29)
++++ repoze/who/plugins/openid/identification.py	(working copy)
+@@ -47,7 +46,11 @@
+                     rememberer_name = '',
+                     sql_associations_table = '',
+                     sql_nonces_table = '',
+-                    sql_connstring = ''):
++                    sql_connstring = '',
++                    md_provider_name = 'openidmd',
++                    sreg_required = None,
++                    sreg_optional = None,
++                    ):
+
+         self.rememberer_name = rememberer_name
+         self.login_handler_path = login_handler_path
+@@ -64,6 +67,10 @@
+         self.sql_nonces_table = sql_nonces_table
+         self.sql_connstring = sql_connstring
+
++        self.md_provider_name = md_provider_name
++        self.sreg_required = sreg_required or []
++        self.sreg_optional = sreg_optional or ['email','fullname', 'nickname']
++        
+         # set up the store
+         if store==u"file":
+             self.store = filestore.FileOpenIDStore(store_file_path)
+@@ -77,6 +84,9 @@
+     def _get_rememberer(self, environ):
+         rememberer = environ['repoze.who.plugins'][self.rememberer_name]
+         return rememberer
++    def _get_md_provider(self, environ):
++        md_provider = environ['repoze.who.plugins'].get(self.md_provider_name)
++        return md_provider
+
+     def get_consumer(self,environ):
+         session = environ.get(self.session_name,{})
+@@ -128,7 +138,8 @@
+         # in the case we are coming from the login form we should have 
+         # an openid in here the user entered
+             open_id = request.params.get(self.openid_field, None)
+-            environ['repoze.who.logger'].debug('checking openid results for : %s ' %open_id)
++            log = environ['repoze.who.logger']
++            log.debug('checking openid results for : %s ' %open_id)
+
+             if open_id is not None:
+                 open_id = open_id.strip()
+@@ -145,7 +156,7 @@
+                 info = oidconsumer.complete(request.params, request.url)
+
+                 if info.status == consumer.SUCCESS:
+-                    environ['repoze.who.logger'].info('openid request successful for : %s ' %open_id)
++                    log.info('openid request successful for : %s ' %open_id)
+
+                     display_identifier = info.identity_url
+
+@@ -154,6 +165,35 @@
+
+                     # store the id for the authenticator
+                     identity['repoze.who.plugins.openid.userid'] = display_identifier
++                    # store the user metadata...
++                    try:
++                        sreg_resp = sreg.SRegResponse.fromSuccessResponse(info)
++                    except AttributeError, err:
++                        log.warn( "Failure during SReg parsing: %s"%( err,) )
++                        sreg_resp = None
++                    if sreg_resp:
++                        environ['repoze.who.logger'].debug("User info received: %s", sreg_resp.data)
++                        user_data = dict()
++                        for field in self.sreg_required + self.sreg_optional:
++                            sreg_val = sreg_resp.get(field)
++                            if sreg_val:
++                                user_data[field] = sreg_val
++                        if user_data:
++                            md = self._get_md_provider( environ )
++                            if md:
++                                if not md.register_user( 
++                                    display_identifier, user_data 
++                                ):
++                                    log.error( "Unable to register user" )
++                                    return None
++                            else:
++                                log.warn( "No metadata provider %s found"%(
++                                    self.md_provider_name,
++                                ))
++                    else:
++                        log.warn(
++                            "No user metadata received!"
++                        )
+
+                     # now redirect to came_from or the success page
+                     self.redirect_to_logged_in(environ)
+@@ -233,7 +273,6 @@
+             environ['repoze.who.logger'].info('Error in discovery: %s ' %exc[0])
+             return self._redirect_to_loginform(environ)
+             return None
+-           
+         # not sure this can still happen but we are making sure.
+         # should actually been handled by the DiscoveryFailure exception above
+         if openid_request is None:
+@@ -257,6 +296,15 @@
+         # TODO: usually you should check openid_request.shouldSendRedirect()
+         # but this might say you have to use a form redirect and I don't get why
+         # so we do the same as plone.openid and ignore it.
++        
++        # Request additional information (optional here, could require fields as well)...
++        if self.sreg_optional or self.sreg_required:
++            openid_request.addExtension(
++                sreg.SRegRequest(
++                    required = self.sreg_required,
++                    optional = self.sreg_optional,
++                )
++            )
+
+         # TODO: we might also want to give the application some way of adding
+         # extensions to this message.
+Index: repoze/who/plugins/openid/tests/consumer.py
+===================================================================
+--- repoze/who/plugins/openid/tests/consumer.py	(revision 29)
++++ repoze/who/plugins/openid/tests/consumer.py	(working copy)
+@@ -13,6 +13,7 @@
+         self.status=status
+         self.identity_url=identity_url
+         self.message=message
++        self.extensions = []
+
+
+     def redirectURL(self, trust_root, return_to):
+@@ -20,8 +21,9 @@
+
+     def getDisplayIdentifier(self):
+         return "http://foobar.com"
++    def addExtension( self, ext_message ):
++        self.extensions.append( ext_message )
+
+-
+ class MockConsumer:
+     """A mock OpenID consumerclass.
+     """
+Index: repoze/who/plugins/openid/tests/test_challenge.py
+===================================================================
+--- repoze/who/plugins/openid/tests/test_challenge.py	(revision 29)
++++ repoze/who/plugins/openid/tests/test_challenge.py	(working copy)
+@@ -13,42 +13,42 @@
+     """test the challenge plugin"""
+
+     def setUp(self):
+-	self.server_response={
+-		"openid.mode"              : "id_res",
+-		"nonce"                    : "nonce",
+-		"openid.identity"          : "http://repoze.myopenid.com",
+-		"openid.assoc_handle"      : "assoc_handle",
+-		"openid.return_to"         : "return_to",
+-		"openid.signed"            : "signed",
+-		"openid.sig"               : "sig",
+-		"openid.invalidate_handle" : "invalidate_handle",
++        self.server_response={
++                "openid.mode"              : "id_res",
++                "nonce"                    : "nonce",
++                "openid.identity"          : "http://repoze.myopenid.com",
++                "openid.assoc_handle"      : "assoc_handle",
++                "openid.return_to"         : "return_to",
++                "openid.signed"            : "signed",
++                "openid.sig"               : "sig",
++                "openid.invalidate_handle" : "invalidate_handle",
+             }
+-	self.plugin = patch_plugin(OpenIdIdentificationPlugin(
+-					store = None,
+-					openid_field = 'repoze.whoplugins.openid.openid',
+-					error_field = '',
+-					store_file_path='',
+-					session_name = '',
+-					login_handler_path = '/login',
+-					logout_handler_path = '',
+-					login_form_url = '/login_form',
+-					logged_in_url = '',
+-					logged_out_url = '',
+-					came_from_field = 'came_from',
+-					rememberer_name = ''
+-					)
+-				   )
++        self.plugin = patch_plugin(OpenIdIdentificationPlugin(
++                                        store = None,
++                                        openid_field = 'repoze.whoplugins.openid.openid',
++                                        error_field = '',
++                                        store_file_path='',
++                                        session_name = '',
++                                        login_handler_path = '/login',
++                                        logout_handler_path = '',
++                                        login_form_url = '/login_form',
++                                        logged_in_url = '',
++                                        logged_out_url = '',
++                                        came_from_field = 'came_from',
++                                        rememberer_name = ''
++                                        )
++                                    )
+
+-	environ = {'wsgi.input':'',
+-	   'wsgi.url_scheme': 'http',
+-	   'SERVER_NAME': 'localhost',
+-	   'SERVER_PORT': '8080',
+-	   'CONTENT_TYPE':'text/html',
+-	   'CONTENT_LENGTH':0,
+-	   'REQUEST_METHOD':'POST',
+-	   'PATH_INFO': '/protected',
+-	   'QUERY_STRING':'',
+-	}
++        environ = {'wsgi.input':'',
++            'wsgi.url_scheme': 'http',
++            'SERVER_NAME': 'localhost',
++            'SERVER_PORT': '8080',
++            'CONTENT_TYPE':'text/html',
++            'CONTENT_LENGTH':0,
++            'REQUEST_METHOD':'POST',
++            'PATH_INFO': '/protected',
++            'QUERY_STRING':'',
++        }
+
+         class DummyLogger:
+             warnings = []
+@@ -62,101 +62,101 @@
+                 self.infos.append(msg)
+         logger = environ['repoze.who.logger'] = DummyLogger()
+
+-	self.environ=environ
++        self.environ=environ
+
+     def tearDown(self):
+-	pass
++        pass
+
+     def test_challenge_decider(self):
+-	"""test challenge decider"""
++        """test challenge decider"""
+
+-	environ = self.environ
+-	environ['repoze.whoplugins.openid.openid'] = 'foobar.com'
++        environ = self.environ
++        environ['repoze.whoplugins.openid.openid'] = 'foobar.com'
+
+-	# decider takes environ, status, headers
+-	self.assertEqual(openid_challenge_decider(environ, '200 Ok', {}), True)
+-	self.assertEqual(openid_challenge_decider({}, '401 Unauthorized', {}), True)
+-	self.assertEqual(openid_challenge_decider({}, '200 Ok', {}), False)
++        # decider takes environ, status, headers
++        self.assertEqual(openid_challenge_decider(environ, '200 Ok', {}), True)
++        self.assertEqual(openid_challenge_decider({}, '401 Unauthorized', {}), True)
++        self.assertEqual(openid_challenge_decider({}, '200 Ok', {}), False)
+
+     def test_challenge_redirect(self):
+-	"""check if the challenge plugin works if given an openid"""
++        """check if the challenge plugin works if given an openid"""
+
+-	# create a form POST response as if we would post the openid
+-	fields = [('repoze.whoplugins.openid.openid','foobar.com')]
+-	content_type, body = encode_multipart_formdata(fields)
++        # create a form POST response as if we would post the openid
++        fields = [('repoze.whoplugins.openid.openid','foobar.com')]
++        content_type, body = encode_multipart_formdata(fields)
+
+-	environ = self.environ
+-	environ['wsgi.input'] = StringIO(body)
+-	environ['REQUEST_METHOD'] = 'POST'
+-	environ['CONTENT_LENGTH'] = len(body)
+-	environ['CONTENT_TYPE'] = content_type
++        environ = self.environ
++        environ['wsgi.input'] = StringIO(body)
++        environ['REQUEST_METHOD'] = 'POST'
++        environ['CONTENT_LENGTH'] = len(body)
++        environ['CONTENT_TYPE'] = content_type
+
+-	# in this case the plugin has to redirect to the openid provider
+-	# faked by MockConsumer in this case
+-	res = self.plugin.challenge(environ, '200 Ok', {}, {})
+-	self.assertEqual(res.location,'http://someopenidprovider.com/somewhere')
+-	self.assertEqual(res.status,'302 Found')
++        # in this case the plugin has to redirect to the openid provider
++        # faked by MockConsumer in this case
++        res = self.plugin.challenge(environ, '200 Ok', {}, {})
++        self.assertEqual(res.location,'http://someopenidprovider.com/somewhere')
++        self.assertEqual(res.status,'302 Found')
+
+     def test_challenge_show_login_form(self):
+-	"""test if the challenge plugin redirects to the login form"""
++        """test if the challenge plugin redirects to the login form"""
+
+-	res = self.plugin.challenge(self.environ, '200 Ok', {}, {})
+-	self.assertEqual(res.location,'/login_form?came_from=http://localhost:8080/protected')
+-	self.assertEqual(res.status,'302 Found')
++        res = self.plugin.challenge(self.environ, '200 Ok', {}, {})
++        self.assertEqual(res.location,'/login_form?came_from=http://localhost:8080/protected')
++        self.assertEqual(res.status,'302 Found')
+
+     def test_login_form_send(self):
+-	"""test if the login form data is received and the environment set correctly"""
+-	fields = [('repoze.whoplugins.openid.openid','foobar.com')]
+-	content_type, body = encode_multipart_formdata(fields)
++        """test if the login form data is received and the environment set correctly"""
++        fields = [('repoze.whoplugins.openid.openid','foobar.com')]
++        content_type, body = encode_multipart_formdata(fields)
+
+-	environ = self.environ
+-	environ['wsgi.input'] = StringIO(body)
+-	environ['REQUEST_METHOD'] = 'POST'
+-	environ['CONTENT_LENGTH'] = len(body)
+-	environ['CONTENT_TYPE'] = content_type
+-	environ['PATH_INFO'] = '/login'
++        environ = self.environ
++        environ['wsgi.input'] = StringIO(body)
++        environ['REQUEST_METHOD'] = 'POST'
++        environ['CONTENT_LENGTH'] = len(body)
++        environ['CONTENT_TYPE'] = content_type
++        environ['PATH_INFO'] = '/login'
+
+-	identity = self.plugin.identify(environ)
+-	self.assertEqual(environ.get('repoze.whoplugins.openid.openid',None), 'foobar.com')
++        identity = self.plugin.identify(environ)
++        self.assertEqual(environ.get('repoze.whoplugins.openid.openid',None), 'foobar.com')
+
+     def test_complete_openid_request(self):
+-	"""test if the openid request completes"""
++        """test if the openid request completes"""
+
+-	environ = self.environ
+-	environ['PATH_INFO'] = '/login'
++        environ = self.environ
++        environ['PATH_INFO'] = '/login'
+
+-	fields = self.server_response.items()
+-	content_type, body = encode_multipart_formdata(fields)
+-	environ['wsgi.input'] = StringIO(body)
+-	environ['REQUEST_METHOD'] = 'POST'
+-	environ['CONTENT_LENGTH'] = len(body)
+-	environ['CONTENT_TYPE'] = content_type
+-	
+-	identity = self.plugin.identify(environ)
+-	self.assertEqual(identity['repoze.who.plugins.openid.userid'],'http://repoze.myopenid.com')
++        fields = self.server_response.items()
++        content_type, body = encode_multipart_formdata(fields)
++        environ['wsgi.input'] = StringIO(body)
++        environ['REQUEST_METHOD'] = 'POST'
++        environ['CONTENT_LENGTH'] = len(body)
++        environ['CONTENT_TYPE'] = content_type
++        
++        identity = self.plugin.identify(environ)
++        self.assertEqual(identity['repoze.who.plugins.openid.userid'],'http://repoze.myopenid.com')
+
+     def test_incomplete_openid_request(self):
+-	"""test if the openid request fails with a wrong identity"""
++        """test if the openid request fails with a wrong identity"""
+
+-	environ = self.environ
+-	environ['PATH_INFO'] = '/login'
++        environ = self.environ
++        environ['PATH_INFO'] = '/login'
+
+-	sresp = self.server_response
+-	sresp['openid.identity'] = ''
++        sresp = self.server_response
++        sresp['openid.identity'] = ''
+
+-	fields = sresp.items()
+-	content_type, body = encode_multipart_formdata(fields)
+-	environ['wsgi.input'] = StringIO(body)
+-	environ['REQUEST_METHOD'] = 'POST'
+-	environ['CONTENT_LENGTH'] = len(body)
+-	environ['CONTENT_TYPE'] = content_type
+-	
+-	identity = self.plugin.identify(environ)
+-	self.assertEqual(identity.get('repoze.who.plugins.openid.userid',None),None)
++        fields = sresp.items()
++        content_type, body = encode_multipart_formdata(fields)
++        environ['wsgi.input'] = StringIO(body)
++        environ['REQUEST_METHOD'] = 'POST'
++        environ['CONTENT_LENGTH'] = len(body)
++        environ['CONTENT_TYPE'] = content_type
++        
++        identity = self.plugin.identify(environ)
++        self.assertEqual(identity.get('repoze.who.plugins.openid.userid',None),None)
+
+     def test_authenticate(self):
+-	"""test if the authentication plugin works as well"""
+-	environ = self.environ
+-	identity = {'repoze.who.plugins.openid.userid' : 'http://foobar.com'}
+-	res = self.plugin.authenticate(environ, identity)
+-	self.assertEqual(res, 'http://foobar.com')
++        """test if the authentication plugin works as well"""
++        environ = self.environ
++        identity = {'repoze.who.plugins.openid.userid' : 'http://foobar.com'}
++        res = self.plugin.authenticate(environ, identity)
++        self.assertEqual(res, 'http://foobar.com')
