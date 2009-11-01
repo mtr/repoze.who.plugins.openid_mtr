@@ -13,6 +13,7 @@ class MockAuthRequest:
         self.status=status
         self.identity_url=identity_url
         self.message=message
+        self.extensions = []
 
 
     def redirectURL(self, trust_root, return_to):
@@ -20,7 +21,8 @@ class MockAuthRequest:
 
     def getDisplayIdentifier(self):
         return "http://foobar.com"
-
+    def addExtension( self, ext_message ):
+        self.extensions.append( ext_message )
 
 class MockConsumer:
     """A mock OpenID consumerclass.
