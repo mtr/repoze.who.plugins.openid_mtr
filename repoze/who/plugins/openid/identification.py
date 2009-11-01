@@ -19,7 +19,6 @@ from openid.fetchers import setDefaultFetcher, Urllib2Fetcher
 from openid.extensions import pape, sreg
 
 
-
 class OpenIdIdentificationPlugin(object):
     """The repoze.who OpenID plugin
     
@@ -47,7 +46,11 @@ class OpenIdIdentificationPlugin(object):
                     rememberer_name = '',
                     sql_associations_table = '',
                     sql_nonces_table = '',
-                    sql_connstring = ''):
+                    sql_connstring = '',
+                    md_provider_name = 'openidmd',
+                    sreg_required = None,
+                    sreg_optional = None,
+                    ):
 
         self.rememberer_name = rememberer_name
         self.login_handler_path = login_handler_path
@@ -64,6 +67,10 @@ class OpenIdIdentificationPlugin(object):
         self.sql_nonces_table = sql_nonces_table
         self.sql_connstring = sql_connstring
         
+        self.md_provider_name = md_provider_name
+        self.sreg_required = sreg_required or []
+        self.sreg_optional = sreg_optional or ['email','fullname', 'nickname']
+        
         # set up the store
         if store==u"file":
             self.store = filestore.FileOpenIDStore(store_file_path)
@@ -77,6 +84,9 @@ class OpenIdIdentificationPlugin(object):
     def _get_rememberer(self, environ):
         rememberer = environ['repoze.who.plugins'][self.rememberer_name]
         return rememberer
+    def _get_md_provider(self, environ):
+        md_provider = environ['repoze.who.plugins'].get(self.md_provider_name)
+        return md_provider
 
     def get_consumer(self,environ):
         session = environ.get(self.session_name,{})
@@ -128,7 +138,8 @@ class OpenIdIdentificationPlugin(object):
         # in the case we are coming from the login form we should have 
         # an openid in here the user entered
             open_id = request.params.get(self.openid_field, None)
-            environ['repoze.who.logger'].debug('checking openid results for : %s ' %open_id)
+            log = environ['repoze.who.logger']
+            log.debug('checking openid results for : %s ' %open_id)
             
             if open_id is not None:
                 open_id = open_id.strip()
@@ -145,7 +156,7 @@ class OpenIdIdentificationPlugin(object):
                 info = oidconsumer.complete(request.params, request.url)
 
                 if info.status == consumer.SUCCESS:
-                    environ['repoze.who.logger'].info('openid request successful for : %s ' %open_id)
+                    log.info('openid request successful for : %s ' %open_id)
                     
                     display_identifier = info.identity_url
                     
@@ -154,6 +165,35 @@ class OpenIdIdentificationPlugin(object):
                     
                     # store the id for the authenticator
                     identity['repoze.who.plugins.openid.userid'] = display_identifier
+                    # store the user metadata...
+                    try:
+                        sreg_resp = sreg.SRegResponse.fromSuccessResponse(info)
+                    except AttributeError, err:
+                        log.warn( "Failure during SReg parsing: %s"%( err,) )
+                        sreg_resp = None
+                    if sreg_resp:
+                        environ['repoze.who.logger'].debug("User info received: %s", sreg_resp.data)
+                        user_data = dict()
+                        for field in self.sreg_required + self.sreg_optional:
+                            sreg_val = sreg_resp.get(field)
+                            if sreg_val:
+                                user_data[field] = sreg_val
+                        if user_data:
+                            md = self._get_md_provider( environ )
+                            if md:
+                                if not md.register_user( 
+                                    display_identifier, user_data 
+                                ):
+                                    log.error( "Unable to register user" )
+                                    return None
+                            else:
+                                log.warn( "No metadata provider %s found"%(
+                                    self.md_provider_name,
+                                ))
+                    else:
+                        log.warn(
+                            "No user metadata received!"
+                        )
 
                     # now redirect to came_from or the success page
                     self.redirect_to_logged_in(environ)
@@ -233,7 +273,6 @@ class OpenIdIdentificationPlugin(object):
             environ['repoze.who.logger'].info('Error in discovery: %s ' %exc[0])
             return self._redirect_to_loginform(environ)
             return None
-           
         # not sure this can still happen but we are making sure.
         # should actually been handled by the DiscoveryFailure exception above
         if openid_request is None:
@@ -257,6 +296,15 @@ class OpenIdIdentificationPlugin(object):
         # TODO: usually you should check openid_request.shouldSendRedirect()
         # but this might say you have to use a form redirect and I don't get why
         # so we do the same as plone.openid and ignore it.
+        
+        # Request additional information (optional here, could require fields as well)...
+        if self.sreg_optional or self.sreg_required:
+            openid_request.addExtension(
+                sreg.SRegRequest(
+                    required = self.sreg_required,
+                    optional = self.sreg_optional,
+                )
+            )
 
         # TODO: we might also want to give the application some way of adding
         # extensions to this message.
