@@ -1,4 +1,5 @@
 from identification import OpenIdIdentificationPlugin
+from repoze.who.utils import resolveDotted
 
 def make_identification_plugin(
     store='mem',
